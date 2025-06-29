@@ -1,0 +1,860 @@
+#include<iostream>
+#include<complex>
+#include<vector>
+#include<bitset>
+#include <random>
+#include <cstdint>
+#include <cmath>
+#include <iomanip>
+#include <fstream>
+const int N = 64; //group size
+const size_t bitstream_length = 1 << 25; // bit stream length
+const size_t QAM_symbol_length = bitstream_length >> 2;
+const size_t cp_length = N >> 2; //one cp length
+const size_t cp_symbol_length = N + cp_length;
+const size_t nb_symbols = QAM_symbol_length >> 6; // number of ofdm symbols
+const double pi = M_PI;
+std::complex<double> j(0,1);
+using Complex = std::complex<double>;
+using ComplexFixed = std::complex<int64_t>;
+//--------------------------------------------------------FFT part---------------------------------------------------------//
+//bit reverse
+int reverse(int m, int NU){
+    int IBR = 0;
+    for(int I1 = 0; I1 < NU; I1++){
+        int J2 =m >> 1;
+        IBR = 2 * IBR + (m - 2 * J2);
+        m = J2;
+    }
+    return IBR;
+}
+
+//FFT main function
+void fft(std::vector<Complex>& a, int N, bool inverse){
+    //initialization
+    int y = 6;
+    int NU = y;
+    int N2 = N/2; //first dual node spacing
+    int NU1 = y - 1; //for Twiddle Factor
+    int k = 0; //first element of input
+    int l = 1;
+    //butterfly operate
+    while(l <= y){
+        while(k < N - 1){ // if k >= N + 1, go to next stage
+            for(int I = 0;I < N2 ; I++){
+                int M = k >> NU1;
+                int P = reverse(M, y);
+                std::complex<double> T1 = std::exp((inverse?j:-j) * (2 * pi * P / N)) * a[k + N2];
+                a[k + N2] = a[k] - T1;
+                a[k] = a[k] + T1;
+                k++;
+                }
+            k = k + N2;
+        }
+        l = l + 1; // next stage
+        k = 0; //reset k
+        N2 = N2 / 2; //smaller dual node spacing
+        NU1 = NU1 - 1;    
+        }
+       
+    //unscrambling
+    for(k=0; k < N-1; k++){
+        int r = reverse(k,y);
+        if (k > r){
+            std:swap(a[r], a[k]);
+        }
+    }
+    
+    // for IFFT
+    if(inverse){
+        for(Complex& x : a){
+            x /= N;
+        }
+    }
+}
+//-------------------------------------------------------------------------------------------------------------------------//
+//QAM modulation
+Complex modulate16QAM(int data){
+    static const Complex constellation[] = {
+        {-3,3}, {-3,1}, {-3,-3}, {-3,-1},
+        {-1,3}, {-1,1}, {-1,-3}, {-1,-1},
+        {3,3}, {3,1}, {3,-3}, {3,-1},
+        {1,3}, {1,1}, {1,-3}, {1,-1}
+         
+    };
+    return constellation[data];
+}
+//-------------------------------------------------------------------------------------------------------------------------//
+//QAMsymbols generate
+std::vector<Complex>QAM_symbol_generator(std::vector<bool>& bitstream){
+    std::vector<Complex> QAM_symbols;
+    for (int i = 0; i < bitstream_length; i += 4) {
+            int data = (bitstream[i] << 3) | (bitstream[i + 1] << 2) | (bitstream[i + 2] << 1) | bitstream[i + 3];  
+            QAM_symbols.push_back(modulate16QAM(data) / std::sqrt(10));  
+        }
+    return QAM_symbols;
+}
+
+//--------------------------------------------------------------------------------------------------------------------------//
+//IFFT function
+std::vector<Complex> ifftmodulation(std::vector<Complex>& signal){
+        std::vector<Complex> ofdm_symbols(nb_symbols * N); 
+        for (int i = 0; i < nb_symbols; i++) {
+            int start_point = i * N;
+            std::vector<Complex> group(signal.begin() + start_point, signal.begin() + start_point + N);
+            fft(group, N, true);  // IFFT
+            std::copy(group.begin(), group.end(), ofdm_symbols.begin() + start_point); 
+        }
+        return ofdm_symbols;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//insert cp
+std::vector<Complex> insert_cyclic_prefix(const std::vector<Complex>& symbols) {
+    std::vector<Complex> output;
+    output.reserve(nb_symbols * cp_symbol_length); 
+
+    for (size_t i = 0; i < nb_symbols; i++) {
+        size_t start = i * N;
+        //cp first
+        output.insert(output.end(), symbols.begin() + start + N - cp_length, symbols.begin() + start + N);
+        //then ofdm_symbol
+        output.insert(output.end(), symbols.begin() + start, symbols.begin() + start + N);
+    }
+
+    return output;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//add AWGN channel
+std::vector<Complex> addAWGN(std::vector<Complex>& signal, double SNR_db){
+    //calculate power of signal
+    double signal_power = 0.0;
+    for(const auto& sample : signal ){
+        signal_power += std::norm(sample);
+    }
+    
+    signal_power = signal_power/signal.size();//calaulate average power
+
+    double SNR_linear = pow(10,SNR_db/10);
+    double noise_power = signal_power/SNR_linear;
+
+    //Add noise to the signal
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::normal_distribution<> dis(0, std::sqrt(noise_power / 2));
+    
+    std::vector<Complex> noise(signal.size());
+    for (auto& sample : noise) {
+        double real_noise = dis(gen);
+        double imag_noise = dis(gen);
+        sample = Complex(real_noise, imag_noise);
+    }
+
+    std::vector<Complex> noise_signal(signal.size());
+    for (size_t i = 0; i < signal.size(); i++) {
+        noise_signal[i] = signal[i] + noise[i];
+    }
+    return noise_signal;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//Autocorrelation Function
+int AutocorrelationFunction(std::vector<Complex>& signal){
+    int C = cp_length;
+    double max_gamma_d = 0.0;
+    int FFT_boundary = 0;
+    int signal_size = nb_symbols * cp_symbol_length;
+    for(int d = 0; d < cp_length + N; d++){
+        Complex phi_d(0,0);
+        double p_d = 0.0;
+        for(int m = 0; m < nb_symbols; m++){
+            for(int k = 0; k < C ; k++){
+                size_t idx = d + k + m * (N + cp_length);
+                if (idx >= signal_size || idx + N >= signal_size) {
+                    continue;
+                }
+                phi_d += signal[idx] * std::conj(signal[idx + N]);//step1 calaulate phi_d
+                p_d += std::norm(signal[idx + N]);//step2 calaulate p_d
+            }
+        }
+
+        double gamma_d = std::norm(phi_d) / (p_d * p_d);//step3 calculation gamma_d
+        // std::cout << "d = " << d << ", gamma_d (floating point): (" 
+        //       << gamma_d << ")\n";
+        //step4 find max gamma_d and boundary
+        if(gamma_d > max_gamma_d){
+            max_gamma_d = gamma_d;
+            FFT_boundary = d;
+        }
+
+    }
+    std::cout << "max_gamma = " << max_gamma_d << "\n";
+    std::cout << "start point = " << FFT_boundary << "\n";
+    return FFT_boundary;
+}
+
+//--------------------------------------------------------------------------------------------------------------------------//
+// Remove CP function
+std::vector<Complex> remove_cyclic_prefix(const std::vector<Complex>& signal, int rx_start_point) {
+    std::vector<Complex> output;
+    output.reserve(nb_symbols * N); 
+    for (size_t i = 0; i < nb_symbols; i++) {
+        size_t start = i * cp_symbol_length + rx_start_point + cp_length; // start point for remove cp
+        output.insert(output.end(), signal.begin() + start, signal.begin() + start + N); // remove cp
+    }
+    return output;
+}
+
+//--------------------------------------------------------------------------------------------------------------------------//
+//QAM demodulation function
+std::vector<bool> QAMdemapping(const std::vector<Complex>& symbols) {
+    std::vector<bool> bits;
+    double normalization_factor = std::sqrt(10); 
+
+    for(const auto& symbol : symbols) {
+        Complex normalized_symbol = symbol * normalization_factor; 
+        double x = std::real(normalized_symbol);
+        double y = std::imag(normalized_symbol);
+        bool b0, b1, b2, b3;
+
+        // real demapping
+        if (x <= -2) {
+            b0 = 0;
+            b1 = 0;
+        } else if (x > -2 && x <= 0) {
+            b0 = 0;
+            b1 = 1;
+        } else if (x > 0 && x <= 2) {
+            b0 = 1;
+            b1 = 1;
+        } else { 
+            b0 = 1;
+            b1 = 0;
+        }
+
+        // imag demapping
+        if (y > 2) {
+            b2 = 0;
+            b3 = 0;
+        } else if (y > 0 && y <= 2) {
+            b2 = 0;
+            b3 = 1;
+        } else if (y > -2 && y <= 0) {
+            b2 = 1;
+            b3 = 1;
+        } else { 
+            b2 = 1;
+            b3 = 0;
+        }
+
+        bits.push_back(b0);
+        bits.push_back(b1);
+        bits.push_back(b2);
+        bits.push_back(b3);
+    }
+    return bits;
+}
+
+//--------------------------------------------------------------------------------------------------------------------------//
+// Bit Error Rate (BER) calculation
+double calculate_BER(const std::vector<bool>& original_bitstream, const std::vector<bool>& rx_bitstream) {
+    size_t error_bits = 0;
+    
+    for (size_t i = 0; i < original_bitstream.size(); i++) {
+        if (original_bitstream[i] != rx_bitstream[i]) {
+            error_bits++;
+        }
+    }
+
+    double BER = static_cast<double>(error_bits) / original_bitstream.size();
+    return BER;
+}
+
+//--------------------------------------------------------------------------------------------------------------------------//
+//FFT demodulation function
+std::vector<Complex> FFT_demodulation(std::vector<Complex>& signal){
+    std::vector<Complex> output;
+    output.reserve(nb_symbols * N);
+        for (int i = 0; i < nb_symbols; i++) {
+            int start_point = i * N;
+            std::vector<Complex> group(signal.begin() + start_point, signal.begin() + start_point + N);
+            fft(group, N, false);  
+            output.insert(output.end(), group.begin(), group.end()); 
+        }
+        return output;
+}
+//----------------------------------------------------------fixed point version------------------------------------------------------------//
+//floating to fixed point 
+int64_t floatToFixedPoint(double value, int scalingFactor) {
+    int64_t fixedPointValue = static_cast<int>(std::round(value * scalingFactor));
+    return fixedPointValue;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//floating point convert to fixed point 
+std::vector<ComplexFixed> floatingToFixedpoint(std::vector<Complex>& floating_symbol, int scaling_factor) {
+    std::vector<ComplexFixed> fixedPointSymbol;
+    fixedPointSymbol.reserve(floating_symbol.size()); 
+
+    for (const auto& symbol : floating_symbol) {
+        int64_t real_part = floatToFixedPoint(symbol.real(), scaling_factor);
+        int64_t imag_part = floatToFixedPoint(symbol.imag(), scaling_factor);
+        fixedPointSymbol.emplace_back(real_part, imag_part);
+    }
+
+    return fixedPointSymbol;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//fixed point to floating point
+double fixedToFloat(int64_t fixedPointValue, int scalingFactor) {
+    return static_cast<float>(fixedPointValue) / scalingFactor;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//convert fixed point vector to floating
+std::vector<Complex> fixedToFloatingPoint(const std::vector<ComplexFixed>& fixedPointSymbols, int scalingFactor) {
+    std::vector<Complex> floatingSymbols;
+    floatingSymbols.reserve(fixedPointSymbols.size()); 
+
+    for (const auto& symbol : fixedPointSymbols) {
+        float realPart = fixedToFloat(symbol.real(), scalingFactor);
+        float imagPart = fixedToFloat(symbol.imag(), scalingFactor);
+        floatingSymbols.emplace_back(realPart, imagPart);
+    }
+
+    return floatingSymbols;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//conjuate for fixed point
+ComplexFixed conjugate(const ComplexFixed& value) {
+    return ComplexFixed(value.real(), -value.imag());
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+// fixed point multiplication
+// int64_t fixedPointMul(int64_t a, int64_t b, int scalingFactor) {
+//     int64_t result = static_cast<int64_t>(a) * static_cast<int64_t>(b);// 32 bit is to prevent overflow
+//     return result / scalingFactor;
+// }
+int64_t fixedPointMul(int64_t a, int64_t b, int scalingFactor) {
+    // 使用 __int128 來儲存和計算超過 64 位的結果
+    __int128 result = static_cast<__int128>(a) * static_cast<__int128>(b);
+    result /= scalingFactor;
+
+    return static_cast<int64_t>(result);
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//multiplication for complex
+ComplexFixed fixedPointComplexMul(const ComplexFixed& a, const ComplexFixed& b, int scalingFactor) {
+    int64_t realPart = fixedPointMul(a.real(), b.real(), scalingFactor) 
+                       - fixedPointMul(a.imag(), b.imag(), scalingFactor);
+    int64_t imagPart = fixedPointMul(a.real(), b.imag(), scalingFactor) 
+                       + fixedPointMul(a.imag(), b.real(), scalingFactor);
+    return ComplexFixed(realPart, imagPart);
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+// norm for fixed point
+int64_t normFixed(std::complex<int64_t> value, int scalingFactor) {
+    int64_t realSq = fixedPointMul(value.real(), value.real(), scalingFactor);
+    int64_t imagSq = fixedPointMul(value.imag(), value.imag(), scalingFactor);
+    return realSq + imagSq;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//fixed point Autocorrelation Function
+int AutocorrelationFunction_fixed_point(std::vector<ComplexFixed>& signal, int scalingFactor) {
+    int C = cp_length;
+    int32_t max_gamma_d = 0;
+    int FFT_boundary = 0;
+    int signal_size = nb_symbols * (N + cp_length);
+
+    for(int d = 0; d < cp_length + N; d++) {
+        std::complex<int64_t> phi_d(0, 0);
+        int64_t p_d = 0;
+
+        for(int m = 0; m < nb_symbols; m++) {
+            for(int k = 0; k < C; k++) {
+                size_t idx = d + k + m * (N + cp_length);
+                if (idx >= signal_size || idx + N >= signal_size) {
+                    continue;
+                }
+
+        
+                std::complex<int64_t> product = fixedPointComplexMul(signal[idx], conjugate(signal[idx + N]), scalingFactor);
+                phi_d.real(phi_d.real() + product.real());
+                phi_d.imag(phi_d.imag() + product.imag());
+                // if(d == 0 && m < 10){
+                //     std::cout << "Element " << k + m * k << ": (" << fixedToFloat(phi_d.real(), scalingFactor) << ", " << fixedToFloat(phi_d.imag(), scalingFactor) << ")\n";
+                // }
+                p_d += normFixed(signal[idx + N], scalingFactor);
+            }
+        }
+
+        int64_t phi_d_norm = normFixed(phi_d, scalingFactor);
+        // std::cout << "d = " << d << ", phi_d_norm (fixed point): (" 
+        //         << fixedToFloat(phi_d_norm, scalingFactor) << ")\n";
+        // std::cout << "d = " << d << ", phi_d_norm (fixed point): (" 
+        //         << phi_d_norm << ")\n";
+        //  std::cout << "d = " << d << ", p_d (fixed point): (" 
+        //          << fixedToFloat(p_d, scalingFactor) << ")\n";
+        // std::cout << "d = " << d << ", p_d (fixed point): (" 
+        //          << fixedPointMul(p_d, p_d, scalingFactor) << ")\n";
+        int64_t gamma_d = static_cast<__int128>(phi_d_norm) * scalingFactor / fixedPointMul(p_d, p_d, scalingFactor);
+        // std::cout << "d = " << d << ", gamma_d (fixed point): (" 
+        //          << fixedToFloat(gamma_d, scalingFactor) << ")\n";        
+        // std::cout << "d = " << d << ", gamma_d (fixed point): (" 
+        //          << gamma_d << ")\n";    
+        if(gamma_d > max_gamma_d) {
+            max_gamma_d = gamma_d;
+            FFT_boundary = d;
+        }
+    }
+
+    std::cout << "max_gamma (fixed point): " << max_gamma_d << "\n";
+    std::cout << "start point = " << FFT_boundary << "\n";
+    return FFT_boundary;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+// Remove CP function(fixed point)
+std::vector<ComplexFixed> remove_cyclic_prefix_fixed_point(const std::vector<ComplexFixed>& signal, int rx_start_point) {
+    std::vector<ComplexFixed> output;
+    output.reserve(nb_symbols * N); 
+    for (size_t i = 0; i < nb_symbols; i++) {
+        size_t start = i * cp_symbol_length + rx_start_point + cp_length; // start point for remove cp
+        output.insert(output.end(), signal.begin() + start, signal.begin() + start + N); // remove cp
+    }
+    return output;
+}
+//--------------------------------------------------------FFT part(fixed point)---------------------------------------------------------//
+//exp for fixed point
+ComplexFixed fixedPointExp(int P, int N, int scalingFactor, bool inverse) {
+
+    double angle = 2 * pi * P / N;
+    if (!inverse) {
+        angle = -angle; 
+    }
+
+    double real_part = std::cos(angle);//exp = cos + j * sin
+    double imag_part = std::sin(angle);
+
+    int64_t realFixed = static_cast<int64_t>(std::round(real_part * scalingFactor));
+    int64_t imagFixed = static_cast<int64_t>(std::round(imag_part * scalingFactor));
+
+
+    return ComplexFixed(realFixed, imagFixed);
+}
+
+//FFT main function
+void fft_fixed(std::vector<ComplexFixed>& a, int N, bool inverse, int scalingFactor){
+    //initialization
+    int y = 6;
+    int NU = y;
+    int N2 = N/2; //first dual node spacing
+    int NU1 = y - 1; //for Twiddle Factor
+    int k = 0; //first element of input
+    int l = 1;
+    //butterfly operate
+    while(l <= y){
+        while(k < N - 1){ // if k >= N + 1, go to next stage
+            for(int I = 0;I < N2 ; I++){
+                int M = k >> NU1;
+                int P = reverse(M, y);
+                ComplexFixed twiddle = fixedPointExp(P, N, scalingFactor, inverse);
+                ComplexFixed T1 = fixedPointComplexMul(twiddle, a[k + N2], scalingFactor);
+                a[k + N2] = a[k] - T1;
+                a[k] = a[k] + T1;
+                k++;
+                }
+            k = k + N2;
+        }
+        l = l + 1; // next stage
+        k = 0; //reset k
+        N2 = N2 / 2; //smaller dual node spacing
+        NU1 = NU1 - 1;    
+        }
+       
+    //unscrambling
+    for(k=0; k < N-1; k++){
+        int r = reverse(k,y);
+        if (k > r){
+            std:swap(a[r], a[k]);
+        }
+    }
+    
+    // for IFFT
+    if(inverse){
+        for(ComplexFixed& x : a){
+            x /= N;
+        }
+    }
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//FFT demodulation (fixed point)
+std::vector<ComplexFixed> FFT_demodulation_fixed(std::vector<ComplexFixed>& signal, int scalingFactor){
+    std::vector<ComplexFixed> output;
+    output.reserve(nb_symbols * N);
+        for (int i = 0; i < nb_symbols; i++) {
+            int start_point = i * N;
+            std::vector<ComplexFixed> group(signal.begin() + start_point, signal.begin() + start_point + N);
+            fft_fixed(group, N, false, scalingFactor);  
+            output.insert(output.end(), group.begin(), group.end()); 
+        }
+        return output;
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+//QAM demodulation function fixed point
+// std::vector<bool> QAMdemapping_fixed_point(const std::vector<ComplexFixed>& symbols, int scalingFactor) {
+//     std::vector<bool> rx_bitstream;
+//     rx_bitstream.reserve(bitstream_length);
+//     //int64_t fixed_sqrt2 = static_cast<int64_t>(std::round(std::sqrt(10) * scalingFactor));
+//     int normalize_factor = std::sqrt(10);
+//     for (size_t i = 0; i < QAM_symbol_length; i++) {
+//         // Undo the normalization by multiplying by sqrt(2)
+//         double real_part = fixedToFloat(std::real(symbols[i]), scalingFactor) * normalize_factor;
+//         double imag_part = fixedToFloat(std::imag(symbols[i]), scalingFactor) * normalize_factor;
+//         bool b0, b1, b2, b3;
+//         // real demapping
+//         if (real_part <= -2) {
+//             b0 = 0;
+//             b1 = 0;
+//         } else if (real_part > -2 && real_part <= 0) {
+//             b0 = 0;
+//             b1 = 1;
+//         } else if (real_part > 0 && real_part <= 2) {
+//             b0 = 1;
+//             b1 = 1;
+//         } else { 
+//             b0 = 1;
+//             b1 = 0;
+//         }
+
+//         // imag demapping
+//         if (imag_part > 2) {
+//             b2 = 0;
+//             b3 = 0;
+//         } else if (imag_part > 0 && imag_part <= 2) {
+//             b2 = 0;
+//             b3 = 1;
+//         } else if (imag_part > -2 && imag_part <= 0) {
+//             b2 = 1;
+//             b3 = 1;
+//         } else { 
+//             b2 = 1;
+//             b3 = 0;
+//         }
+
+//         rx_bitstream.push_back(b0);
+//         rx_bitstream.push_back(b1);
+//         rx_bitstream.push_back(b2);
+//         rx_bitstream.push_back(b3);
+//     }
+//     return rx_bitstream;
+// }
+std::vector<bool> QAMdemapping_fixed_point(const std::vector<ComplexFixed>& symbols, int scalingFactor) {
+    std::vector<bool> bits;
+    int64_t normalization_factor = static_cast<int64_t>(std::round(std::sqrt(10) * scalingFactor));
+
+    for(const auto& symbol : symbols) {
+        // Normalize the symbol
+        int64_t real_part = (symbol.real() * normalization_factor) / scalingFactor;
+        int64_t imag_part = (symbol.imag() * normalization_factor) / scalingFactor;
+        bool b0, b1, b2, b3;
+
+        // Real part demapping
+        if (real_part <= -2 * scalingFactor) {
+            b0 = 0;
+            b1 = 0;
+        } else if (real_part > -2 * scalingFactor && real_part <= 0) {
+            b0 = 0;
+            b1 = 1;
+        } else if (real_part > 0 && real_part <= 2 * scalingFactor) {
+            b0 = 1;
+            b1 = 1;
+        } else { 
+            b0 = 1;
+            b1 = 0;
+        }
+
+        // Imaginary part demapping
+        if (imag_part > 2 * scalingFactor) {
+            b2 = 0;
+            b3 = 0;
+        } else if (imag_part > 0 && imag_part <= 2 * scalingFactor) {
+            b2 = 0;
+            b3 = 1;
+        } else if (imag_part > -2 * scalingFactor && imag_part <= 0) {
+            b2 = 1;
+            b3 = 1;
+        } else { 
+            b2 = 1;
+            b3 = 0;
+        }
+
+        bits.push_back(b0);
+        bits.push_back(b1);
+        bits.push_back(b2);
+        bits.push_back(b3);
+    }
+    return bits;
+}
+//--------------------------------------------------------matlab plot----------------------------------------------------------------//
+//output ofdm_stmbols for matlab
+void ofdm_symbols_waveform(std::vector<Complex>& signal){
+    std::ofstream file("ofdm_symbols.txt");
+    for (int i = 0; i < 240; i++) {
+        file << std::real(signal[i]) << " " << std::imag(signal[i]) << "\n";
+    }
+    file.close();
+}
+void noise_ofdm_symbols_waveform3db(std::vector<Complex>& signal){
+    std::ofstream file_noise_ofdm("noise_ofdm_symbols_3db.txt");
+    for (int i = 0; i < 240; i++) {
+        file_noise_ofdm << std::real(signal[i]) << " " << std::imag(signal[i]) << "\n";
+    }
+    file_noise_ofdm.close();
+}
+void noise_ofdm_symbols_waveform15db(std::vector<Complex>& signal){
+    std::ofstream file_noise_ofdm("noise_ofdm_symbols_15db.txt");
+    for (int i = 0; i < 240; i++) {
+        file_noise_ofdm << std::real(signal[i]) << " " << std::imag(signal[i]) << "\n";
+    }
+    file_noise_ofdm.close();
+}
+// Save the first 192 rx_QAM_symbols to a file for MATLAB plotting
+void save_rx_QAM_symbols(const std::vector<Complex>& rx_QAM_symbols, const std::string& filename) {
+    std::ofstream file(filename);
+    for (int i = 0; i < 192; i++) {
+        file << std::real(rx_QAM_symbols[i]) * std::sqrt(2) << " " << std::imag(rx_QAM_symbols[i]) * std::sqrt(2) << "\n";
+    }
+    file.close();
+}
+//--------------------------------------------------------print part----------------------------------------------------------------//
+
+//print the vector
+void print_rx_bitstream(const std::vector<bool>& rx_bitstream) {
+    std::cout << "rx_bitstream: ";
+    for (size_t i = 0; i < rx_bitstream.size(); i++) {
+        std::cout << rx_bitstream[i];
+        if (i % 8 == 7) {
+            std::cout << " ";  // Insert space every 8 bits for readability
+        }
+    }
+    std::cout << std::endl;
+}
+//print fixed point and origin for comparsion
+void printComplexVector(const std::vector<Complex>& vec, const std::string& vec_name) {
+    std::cout << vec_name << " 前 10 個元素:\n";
+    for (size_t i = 0; i < 10 && i < vec.size(); ++i) {
+        std::cout << "Element " << i << ": (" << std::real(vec[i]) << ", " << std::imag(vec[i]) << ")\n";
+    }
+}
+
+// 顯示定點數複數向量的前 10 個元素
+void printComplexFixedVector(const std::vector<std::complex<int16_t>>& vec, const std::string& name, int scalingFactor) {
+    std::cout << "前 10 個 " << name << ":\n";
+    for (size_t i = 0; i < std::min(vec.size(), static_cast<size_t>(10)); ++i) {
+        double real = static_cast<double>(vec[i].real()) / scalingFactor;
+        double imag = static_cast<double>(vec[i].imag()) / scalingFactor;
+        std::cout << name << "[" << i << "] = (" << real << ", " << imag << ")\n";
+    }
+}
+//--------------------------------------------------------------------------------------------------------------------------//
+
+int main(){
+    std::vector<double> SNR_db_values;
+    std::vector<double> BER_floating_values;
+    std::vector<double> BER_fixed_8bit_values;
+    std::vector<double> BER_fixed_10bit_values;
+    std::vector<double> BER_fixed_12bit_values;
+    std::vector<double> BER_fixed_14bit_values;
+    std::vector<double> BER_fixed_16bit_values;
+    std::vector<double> BER_fixed_18bit_values;
+    std::vector<double> BER_fixed_20bit_values;
+
+
+    
+        //generate random bit stream
+        std::cout << "start generator bitstream\n";
+        std::cout << "============================================\n";
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> dis(0,1);
+        std::vector<bool> bitstream; // each bool is 1 bit
+        for (int i = 0; i < bitstream_length; ++i) {
+            bitstream.push_back(dis(gen));  
+        }
+
+        //start QAM mapping
+        std::cout << "start QAM mapping\n";
+        std::cout << "============================================\n";
+        std::vector<Complex> QAM_symbols =  QAM_symbol_generator(bitstream);
+        
+        // S/P and IFFT
+        std::cout << "start IFFT \n";
+        std::cout << "============================================\n";
+        std::vector<Complex> ofdm_symbols = ifftmodulation( QAM_symbols);
+        std::cout << "start cp insertion\n";
+        std::cout << "============================================\n";
+        std::vector<Complex> ofdm_symbols_with_cp = insert_cyclic_prefix(ofdm_symbols);
+        //plot waveform
+        ofdm_symbols_waveform(ofdm_symbols_with_cp);
+        
+        for (double SNR_db = 0.0; SNR_db <= 15.0; SNR_db += 3.0) {
+            // AWGN channel
+            std::cout << "start add AWGN\n";
+            std::cout << "============================================\n";
+            std::vector<Complex> noise_ofdm_symbols = addAWGN(ofdm_symbols_with_cp, SNR_db);
+            // Autocorrelation  
+            std::cout << "start autocorrelation\n";
+            std::cout << "============================================\n";
+            size_t rx_start_point = AutocorrelationFunction(noise_ofdm_symbols);
+            // Autocorrelation(fixed point)
+            int scalingFactor_8bit = 1 << 4;
+            int scalingFactor_10bit = 1 << 5;
+            int scalingFactor_12bit = 1 << 6;
+            int scalingFactor_14bit = 1 << 7;
+            int scalingFactor_16bit = 1 << 8;
+            int scalingFactor_18bit = 1 << 9;
+            int scalingFactor_20bit = 1 << 10;
+            // int scalingFactor_32bit = 1 << 16;
+            std::vector<ComplexFixed> noise_ofdm_symbols_8bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_8bit );
+            std::vector<ComplexFixed> noise_ofdm_symbols_10bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_10bit );
+            std::vector<ComplexFixed> noise_ofdm_symbols_12bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_12bit );
+            std::vector<ComplexFixed> noise_ofdm_symbols_14bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_14bit );
+            std::vector<ComplexFixed> noise_ofdm_symbols_16bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_16bit);
+            std::vector<ComplexFixed> noise_ofdm_symbols_18bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_18bit);
+            std::vector<ComplexFixed> noise_ofdm_symbols_20bit_fixed_point = floatingToFixedpoint(noise_ofdm_symbols, scalingFactor_20bit);
+            // fixed point to floating
+            // std::vector<Complex> noise_ofdm_symbols_floating = fixedToFloatingPoint(noise_ofdm_symbols_32bit_fixed_point, scalingFactor_32bit);
+            // printComplexVector(noise_ofdm_symbols_floating, "noise_ofdm_symbols_floating");
+            // printComplexVector(noise_ofdm_symbols, "noise_ofdm_symbols");
+            
+            std::cout << "start autocorrelation 8bit fixed point version\n";
+            std::cout << "============================================\n";
+            size_t rx_start_point_8bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_8bit_fixed_point, scalingFactor_8bit);
+            std::cout << "start autocorrelation 10bit fixed point version\n";
+            std::cout << "============================================\n";         
+            size_t rx_start_point_10bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_10bit_fixed_point, scalingFactor_10bit);
+            std::cout << "start autocorrelation 12bit fixed point version\n";
+            std::cout << "============================================\n";         
+            size_t rx_start_point_12bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_12bit_fixed_point, scalingFactor_12bit);
+            std::cout << "start autocorrelation 14bit fixed point version\n";
+            std::cout << "============================================\n";         
+            size_t rx_start_point_14bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_14bit_fixed_point, scalingFactor_14bit);
+            std::cout << "start autocorrelation 16bit fixed point version\n";
+            std::cout << "============================================\n";         
+            size_t rx_start_point_16bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_16bit_fixed_point, scalingFactor_16bit);
+            std::cout << "start autocorrelation 18bit fixed point version\n";
+            std::cout << "============================================\n";
+            size_t rx_start_point_18bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_18bit_fixed_point, scalingFactor_18bit);
+            std::cout << "start autocorrelation 20bit fixed point version\n";
+            std::cout << "============================================\n";
+            size_t rx_start_point_20bit_fixed_point = AutocorrelationFunction_fixed_point(noise_ofdm_symbols_20bit_fixed_point, scalingFactor_20bit);
+
+            //CP removal
+            //CP removal
+            std::cout << "start remove cp\n";
+            std::vector<Complex> rx_ofdm_symbols = remove_cyclic_prefix(noise_ofdm_symbols, rx_start_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_8bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_8bit_fixed_point, rx_start_point_8bit_fixed_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_10bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_10bit_fixed_point, rx_start_point_10bit_fixed_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_12bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_12bit_fixed_point, rx_start_point_12bit_fixed_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_14bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_14bit_fixed_point, rx_start_point_14bit_fixed_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_16bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_16bit_fixed_point, rx_start_point_16bit_fixed_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_18bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_18bit_fixed_point, rx_start_point_18bit_fixed_point);
+            std::vector<ComplexFixed> rx_ofdm_symbols_fixed_20bit = remove_cyclic_prefix_fixed_point(noise_ofdm_symbols_20bit_fixed_point, rx_start_point_20bit_fixed_point);        
+
+            // FFT demodulation
+            std::cout << "start FFT demodulation\n";
+            //std::cout << "rx_ofdm_symbols size: " << rx_ofdm_symbols.size() << std::endl;
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_8bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_8bit, scalingFactor_8bit);
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_10bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_10bit, scalingFactor_10bit);
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_12bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_12bit, scalingFactor_12bit);
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_14bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_14bit, scalingFactor_14bit);
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_16bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_16bit, scalingFactor_16bit);
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_18bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_18bit, scalingFactor_18bit);
+            std::vector<ComplexFixed> rx_QAM_symbols_fixed_point_20bit = FFT_demodulation_fixed(rx_ofdm_symbols_fixed_20bit, scalingFactor_20bit);
+
+            // printComplexVector(QAM_symbols, "QAM_symbols");
+            // printComplexFixedVector(rx_QAM_symbols_fixed_point, "rx_QAM_symbols_fixed_point", scalingFactor_16bit);
+            std::vector<Complex> rx_QAM_symbols = FFT_demodulation(rx_ofdm_symbols);
+            // Save the first 192 rx_QAM_symbols for SNR = 3dB and SNR = 15dB
+            // if (SNR_db == 3) {
+            //     save_rx_QAM_symbols(rx_QAM_symbols, "rx_QAM_symbols_3db.txt");
+            // }
+            // if (SNR_db == 15) {
+            //     save_rx_QAM_symbols(rx_QAM_symbols, "rx_QAM_symbols_15db.txt");
+            // }
+
+            // QAM demodulation
+            std::cout << "start  QAM demodulation\n";
+            std::vector<bool> rx_bitstream = QAMdemapping(rx_QAM_symbols);
+            std::vector<bool> rx_bitstream_fixed_point_8bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_8bit, scalingFactor_8bit);
+            std::vector<bool> rx_bitstream_fixed_point_10bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_10bit, scalingFactor_10bit);
+            std::vector<bool> rx_bitstream_fixed_point_12bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_12bit, scalingFactor_12bit);
+            std::vector<bool> rx_bitstream_fixed_point_14bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_14bit, scalingFactor_14bit);
+            std::vector<bool> rx_bitstream_fixed_point_16bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_16bit, scalingFactor_16bit);
+            std::vector<bool> rx_bitstream_fixed_point_18bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_18bit, scalingFactor_18bit);
+            std::vector<bool> rx_bitstream_fixed_point_20bit = QAMdemapping_fixed_point(rx_QAM_symbols_fixed_point_20bit, scalingFactor_20bit);
+            // Calculate BER
+            std::cout << "start  Calculate BER\n";
+            double BER = calculate_BER(bitstream, rx_bitstream);
+            double BER_fixed_8bit = calculate_BER(bitstream, rx_bitstream_fixed_point_8bit);
+            double BER_fixed_10bit = calculate_BER(bitstream, rx_bitstream_fixed_point_10bit);
+            double BER_fixed_12bit = calculate_BER(bitstream, rx_bitstream_fixed_point_12bit);
+            double BER_fixed_14bit = calculate_BER(bitstream, rx_bitstream_fixed_point_14bit);
+            double BER_fixed_16bit = calculate_BER(bitstream, rx_bitstream_fixed_point_16bit);
+            double BER_fixed_18bit = calculate_BER(bitstream, rx_bitstream_fixed_point_18bit);
+            double BER_fixed_20bit = calculate_BER(bitstream, rx_bitstream_fixed_point_20bit);
+            // if(SNR_db <= 6 ){
+            // std::cout << "SNR = " << SNR_db << " dB, BER = " << std::fixed << std::setprecision(10) << BER << "\n";
+            // std::cout << " BER_fixed_8bit = " << std::fixed << std::setprecision(10) << BER_fixed_8bit << "\n";
+            // std::cout << " BER_fixed_16bit = " << std::fixed << std::setprecision(10) << BER_fixed_16bit << "\n";
+            // std::cout << " BER_fixed_32bit = " << std::fixed << std::setprecision(10) << BER_fixed_20bit << "\n";
+            // }
+
+            // Save the SNR and BER values
+            SNR_db_values.push_back(SNR_db);
+            BER_floating_values.push_back(BER);
+            BER_fixed_8bit_values.push_back(BER_fixed_8bit);
+            BER_fixed_10bit_values.push_back(BER_fixed_10bit);
+            BER_fixed_12bit_values.push_back(BER_fixed_12bit);
+            BER_fixed_14bit_values.push_back(BER_fixed_14bit);
+            BER_fixed_16bit_values.push_back(BER_fixed_16bit);
+            BER_fixed_18bit_values.push_back(BER_fixed_18bit);
+            BER_fixed_20bit_values.push_back(BER_fixed_20bit);
+    }
+
+     // Output BER vs SNR data to files for MATLAB or Python plotting
+    std::ofstream file_floating("QAM_ber_floating.txt");
+    std::ofstream file_fixed_8bit("QAM_ber_fixed_8bit.txt");
+    std::ofstream file_fixed_10bit("QAM_ber_fixed_10bit.txt");
+    std::ofstream file_fixed_12bit("QAM_ber_fixed_12bit.txt");
+    std::ofstream file_fixed_14bit("QAM_ber_fixed_14bit.txt");
+    std::ofstream file_fixed_16bit("QAM_ber_fixed_16bit.txt");
+    std::ofstream file_fixed_18bit("QAM_ber_fixed_18bit.txt");
+    std::ofstream file_fixed_20bit("QAM_ber_fixed_20bit.txt");
+
+    for (size_t i = 0; i < SNR_db_values.size(); i++) {
+        file_floating << SNR_db_values[i] << " " << BER_floating_values[i] << "\n";
+        file_fixed_8bit << SNR_db_values[i] << " " << BER_fixed_8bit_values[i] << "\n";
+        file_fixed_10bit << SNR_db_values[i] << " " << BER_fixed_10bit_values[i] << "\n";
+        file_fixed_12bit << SNR_db_values[i] << " " << BER_fixed_12bit_values[i] << "\n";
+        file_fixed_14bit << SNR_db_values[i] << " " << BER_fixed_14bit_values[i] << "\n";
+        file_fixed_16bit << SNR_db_values[i] << " " << BER_fixed_16bit_values[i] << "\n";
+        file_fixed_18bit << SNR_db_values[i] << " " << BER_fixed_18bit_values[i] << "\n";
+        file_fixed_20bit << SNR_db_values[i] << " " << BER_fixed_20bit_values[i] << "\n";
+    }
+
+    file_floating.close();
+    file_fixed_8bit.close();
+    file_fixed_10bit.close();
+    file_fixed_12bit.close();
+    file_fixed_14bit.close();
+    file_fixed_16bit.close();
+    file_fixed_18bit.close();
+    file_fixed_20bit.close();
+    return 0;
+}
+
+
+
+
+
+
+
+
+
