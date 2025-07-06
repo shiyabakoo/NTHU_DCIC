@@ -1,7 +1,7 @@
 # DCIC Final Project
 
 ## Cordic
-cordicv是一種座標旋轉的數學計算方式, 透過加法、減法、位移、查表來計算三角函數及平方根的方法, 不需要透過乘法和減法, 因此很適合用在硬體設計上
+cordic是一種座標旋轉的數學計算方式, 透過加法、減法、位移、查表來計算三角函數及平方根的方法, 不需要透過乘法和減法, 因此很適合用在硬體設計上
 
 
 cordic運作的方式有兩種 1.vector mode 2.rotation mode
@@ -30,6 +30,21 @@ d_i =
 \end{cases}
 $$
 
+
+當經過多次iteration後
+
+$$
+x_{n} = K \cdot \sqrt{x_{0}^2 + y_{0}^2}
+$$
+
+$$
+y_{n} = 0
+$$
+
+$$
+z_{n} = z_{0} + tan^-1(y_{0}/x_{0})
+$$
+
 ### rotation mode
 rotation mode是給定輸入向量及要旋轉的角度, 將輸入向量旋轉給定的旋轉角度
 
@@ -56,6 +71,19 @@ d_i =
 \end{cases}
 $$
 
+當經過多次iteration後
+
+$$
+x_{n} = K \cdot (x_{0}cos(z_{0}) - y_{0}sin(z_{0}))
+$$
+
+$$
+y_{n} = K \cdot (x_{0}sin(z_{0}) + y_{0}cos(z_{0}))
+$$
+
+$$
+z_{n} = 0
+$$
 ### cordic的限制
 cordic有旋轉角度上的限制, 由於cordic是透過小幅度旋轉來達到旋轉向量, 當cordic的次數趨近無限大時, 旋轉角度會達到上限, 其範圍限制在±π/2
 也就是說當rotation mode的旋轉角度超過範圍或是vector mode的向量不在1、4象限的話就要先另外做處理再做cordic
