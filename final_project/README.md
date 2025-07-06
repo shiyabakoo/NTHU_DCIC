@@ -47,6 +47,7 @@ $$
 
 Where the direction of rotation is defined as:
 
+
 $$
 d_i =
 \begin{cases}
@@ -54,3 +55,24 @@ d_i =
 +1 & \text{if } z_i > 0
 \end{cases}
 $$
+
+### cordic的限制
+cordic有旋轉角度上的限制, 由於cordic是透過小幅度旋轉來達到旋轉向量, 當cordic的次數趨近無限大時, 旋轉角度會達到上限, 其範圍限制在±π/2
+也就是說當rotation mode的旋轉角度超過範圍或是vector mode的向量不在1、4象限的話就要先另外做處理再做cordic
+
+$$
+x_{0}、y_{0}、z_{0} 為處理過後的輸入向量及旋轉角度
+$$
+
+$$
+x_{0} = -d\cdot y_{in}
+$$
+
+$$
+y_{0} = d\cdot x_{in}
+$$
+
+$$
+z_{0} = z_{in} - d\cdot \frac{\pi}{2} 
+$$
+
