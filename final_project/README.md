@@ -65,14 +65,21 @@ x_{0}、y_{0}、z_{0} 為處理過後的輸入向量及旋轉角度
 $$
 
 $$
-x_{0} = -d\cdot y_{in}
+x_{0} = -d \cdot y_{in}
 $$
 
 $$
-y_{0} = d\cdot x_{in}
+y_{0} = d \cdot x_{in}
 $$
 
 $$
-z_{0} = z_{in} - d\cdot \frac{\pi}{2} 
+z_{0} = z_{in} - d \cdot \frac{\pi}{2} 
 $$
 
+$$
+d =
+\begin{cases}
+-sign(y_{in})& \text vector mode \\
+sign(z_{in}) & \text rotation mode
+\end{cases}
+$$
