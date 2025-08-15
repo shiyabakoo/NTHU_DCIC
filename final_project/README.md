@@ -34,7 +34,7 @@ $$
 當經過多次iteration後
 
 $$
-x_{n} = K \cdot \sqrt{x_{0}^2 + y_{0}^2}
+x_{n} = A_{n} \cdot \sqrt{x_{0}^2 + y_{0}^2}
 $$
 
 $$
