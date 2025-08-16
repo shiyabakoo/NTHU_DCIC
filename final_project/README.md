@@ -45,6 +45,10 @@ $$
 z_{n} = z_{0} + tan^-1(y_{0}/x_{0})
 $$
 
+$$
+A_n = \prod_{i=0}^{n-1} \sqrt{1 + 2^{-2i}}
+$$
+
 ### rotation mode
 rotation mode是給定輸入向量及要旋轉的角度, 將輸入向量旋轉給定的旋轉角度
 
@@ -74,11 +78,11 @@ $$
 當經過多次iteration後
 
 $$
-x_{n} = K \cdot (x_{0}cos(z_{0}) - y_{0}sin(z_{0}))
+x_{n} = A_{n} \cdot (x_{0}cos(z_{0}) - y_{0}sin(z_{0}))
 $$
 
 $$
-y_{n} = K \cdot (x_{0}sin(z_{0}) + y_{0}cos(z_{0}))
+y_{n} = A_{n} \cdot (x_{0}sin(z_{0}) + y_{0}cos(z_{0}))
 $$
 
 $$
