@@ -89,6 +89,10 @@ $$
 z_{n} = 0
 $$
 
+$$
+A_n = \prod_{i=0}^{n-1} \sqrt{1 + 2^{-2i}}
+$$
+
 如何利用rotation mode去計算cos、sin:
 
 將初始向量設為
