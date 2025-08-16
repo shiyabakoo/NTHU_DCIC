@@ -106,6 +106,9 @@ $$
 cordic有旋轉角度上的限制, 由於cordic是透過小幅度旋轉來達到旋轉向量, 當cordic的次數趨近無限大時, 旋轉角度會達到上限, 其範圍限制在±π/2
 也就是說當rotation mode的旋轉角度超過範圍或是vector mode的向量不在1、4象限的話就要先另外做處理再做cordic
 
+在vector mode中為了防止向量不在1、4象限中, 會先將向量做correction, 把向量旋轉+π/2或-π/2
+而在rotation mode中, 要先判斷角度(z)是否超過±π/2, 才去做修正
+
 $$
 x_{0}、y_{0}、z_{0} 為處理過後的輸入向量及旋轉角度
 $$
@@ -125,7 +128,7 @@ $$
 $$
 d =
 \begin{cases}
--sign(y_{in})& \text vector mode \\
-sign(z_{in}) & \text rotation mode
+-sign(y_{in})& \text {vector mode} \\
+sign(z_{in}) & \text {rotation mode}
 \end{cases}
 $$
